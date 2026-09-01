@@ -143,6 +143,8 @@ pub fn build_env(profile: &Profile, reveal: bool) -> HashMap<String, String> {
         }
     }
 
+    // keep last: the env table wins over models/provider (see Profile::env).
+    // Correctness here depends on source order — nothing may be appended below.
     if let Some(ref env) = profile.env {
         env_map.extend(env.clone());
     }
@@ -308,17 +310,17 @@ mod tests {
 
     #[test]
     fn env_table_is_injected() {
-        let mut env = BTreeMap::new();
-        env.insert(
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
-            "16000".to_string(),
-        );
-        env.insert(
-            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
-            "80".to_string(),
-        );
         let profile = Profile {
-            env: Some(env),
+            env: Some(BTreeMap::from([
+                (
+                    "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
+                    "16000".to_string(),
+                ),
+                (
+                    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
+                    "80".to_string(),
+                ),
+            ])),
             ..Default::default()
         };
 
@@ -335,14 +337,15 @@ mod tests {
 
     #[test]
     fn env_table_overrides_models_on_conflict() {
-        let mut env = BTreeMap::new();
-        env.insert("ANTHROPIC_MODEL".to_string(), "override-model".to_string());
         let profile = Profile {
             models: Some(Models {
                 default: Some("base-model".to_string()),
                 ..Default::default()
             }),
-            env: Some(env),
+            env: Some(BTreeMap::from([(
+                "ANTHROPIC_MODEL".to_string(),
+                "override-model".to_string(),
+            )])),
             ..Default::default()
         };
 
@@ -350,6 +353,28 @@ mod tests {
         assert_eq!(
             e.get("ANTHROPIC_MODEL").map(String::as_str),
             Some("override-model")
+        );
+    }
+
+    #[test]
+    fn env_table_overrides_provider_on_conflict() {
+        let profile = Profile {
+            provider: Some(Provider {
+                base_url: "https://api.example.com".to_string(),
+                env_key: "MY_API_KEY".to_string(),
+            }),
+            env: Some(BTreeMap::from([(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://override.example.com".to_string(),
+            )])),
+            ..Default::default()
+        };
+
+        // reveal = false so no ambient environment variable is read
+        let e = build_env(&profile, false);
+        assert_eq!(
+            e.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://override.example.com")
         );
     }
 

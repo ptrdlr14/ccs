@@ -112,8 +112,8 @@ CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16000"
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | 单次生成上限。未知模型默认常按 32K 预留，会挤占有效输入窗口，自部署建议压到 8k–16k |
 
 Entries are injected last: if `env` sets a variable that `models` / `provider` also
-set, the `env` value wins. The TUI shows the table read-only in an **Env** section;
-edit it in `~/.config/ccs/config.toml`.
+set — or that you have exported in your shell — the `env` value wins. The TUI shows
+the table read-only in an **Env** section; edit it in `~/.config/ccs/config.toml`.
 
 ## License
 

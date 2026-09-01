@@ -23,6 +23,8 @@ fn launch(profile: &config::Profile, profile_name: &str) -> ! {
         .filter(|(k, _)| !k.starts_with("ANTHROPIC_"))
         .collect();
 
+    // Built last over the (ANTHROPIC_-filtered) shell env above, so profile
+    // values — including the `env` table — win over exported variables.
     env_map.extend(config::build_env(profile, true));
 
     let user_args: Vec<String> = env::args().skip(1).filter(|a| a != profile_name).collect();

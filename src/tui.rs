@@ -76,6 +76,11 @@ impl App {
         self.profile_list.select(Some(i));
     }
 
+    /// Visual row of the focused field in the right panel.
+    ///
+    /// Mirrors the row walk in `build_field_items`: one row per field plus a
+    /// header per section. The read-only Env rows are deliberately excluded —
+    /// they sit below the focusable range and can never be selected.
     fn field_list_idx(&self) -> usize {
         let mut visual = 0;
         let mut prev_section: Option<&str> = None;
@@ -89,7 +94,7 @@ impl App {
             }
             visual += 1;
         }
-        1
+        unreachable!("field_idx is always kept in 0..PROFILE_FIELDS.len()")
     }
 
     fn field_next(&mut self) {
@@ -176,12 +181,22 @@ fn section_header(title: &str) -> ListItem<'static> {
     )))
 }
 
+/// `label  value` row: fixed marker column, dim label, caller-styled value.
+fn kv_row<'a>(marker: &'static str, label: &'a str, value: Span<'a>) -> ListItem<'a> {
+    ListItem::new(Line::from(vec![
+        Span::raw(marker),
+        Span::styled(label, Style::default().fg(MUTED)),
+        Span::raw("  "),
+        value,
+    ]))
+}
+
 /// Build the field list items (with section headers) for the right panel.
 /// `focused` indicates whether the right panel has focus.
 fn build_field_items<'a>(
     profile: &'a config::Profile,
     field_idx: usize,
-    input: &'a InputState,
+    input: &InputState,
     focused: bool,
 ) -> Vec<ListItem<'a>> {
     let mut items: Vec<ListItem> = Vec::new();
@@ -197,18 +212,17 @@ fn build_field_items<'a>(
         let is_set = value.is_some();
         let value_str = value.unwrap_or_default();
 
-        let line = match input {
+        let item = match input {
             InputState::Editing { buffer, cursor } if i == field_idx => {
                 let byte_pos = char_to_byte(buffer, *cursor);
                 let mut display = String::with_capacity(buffer.len() + 1);
                 use std::fmt::Write;
                 write!(display, "{}█{}", &buffer[..byte_pos], &buffer[byte_pos..]).unwrap();
-                Line::from(vec![
-                    Span::raw(bullet(focused, true)),
-                    Span::styled(field.label, Style::default().fg(MUTED)),
-                    Span::raw("  "),
+                kv_row(
+                    bullet(focused, true),
+                    field.label,
                     Span::styled(display, Style::default().fg(Color::Yellow)),
-                ])
+                )
             }
             _ => {
                 let val_style = if is_set {
@@ -216,27 +230,25 @@ fn build_field_items<'a>(
                 } else {
                     Style::default().fg(MUTED)
                 };
-                Line::from(vec![
-                    Span::raw(bullet(focused, i == field_idx)),
-                    Span::styled(field.label, Style::default().fg(MUTED)),
-                    Span::raw("  "),
+                kv_row(
+                    bullet(focused, i == field_idx),
+                    field.label,
                     Span::styled(value_str, val_style),
-                ])
+                )
             }
         };
-        items.push(ListItem::new(line));
+        items.push(item);
     }
 
     // ── read-only Env section: configured in config.toml, not editable here ──
     if let Some(env) = profile.env.as_ref().filter(|e| !e.is_empty()) {
         items.push(section_header("Env — edit in ~/.config/ccs/config.toml"));
         for (key, value) in env {
-            items.push(ListItem::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(key.as_str(), Style::default().fg(MUTED)),
-                Span::raw("  "),
+            items.push(kv_row(
+                bullet(false, false),
+                key,
                 Span::styled(value.as_str(), Style::default().fg(Color::Green)),
-            ])));
+            ));
         }
     }
 
@@ -380,7 +392,11 @@ pub fn run(mut app: App) -> (App, Option<String>) {
                 let profile = app.config.profiles.get(selected);
                 let right_focused = app.focus == Focus::Right;
                 let field_items = if let Some(profile) = profile {
-                    build_field_items(profile, app.field_idx, &app.input, right_focused)
+                    let items =
+                        build_field_items(profile, app.field_idx, &app.input, right_focused);
+                    // field_list_idx() and build_field_items() must keep counting rows alike
+                    debug_assert!(app.field_list_idx() < items.len());
+                    items
                 } else {
                     vec![ListItem::new("")]
                 };
@@ -559,23 +575,26 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// Rows rendered for a profile without any env entries.
+    /// Rows rendered for `profile` with nothing being edited.
+    fn rows_for(profile: &config::Profile) -> Vec<ListItem<'_>> {
+        build_field_items(profile, 0, &InputState::None, true)
+    }
+
+    /// Row count for a profile without any env entries.
     fn baseline_rows() -> usize {
-        build_field_items(&config::Profile::default(), 0, &InputState::None, true).len()
+        rows_for(&config::Profile::default()).len()
     }
 
     #[test]
     fn field_items_include_readonly_env_section() {
-        let mut env = BTreeMap::new();
-        env.insert(
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
-            "16000".to_string(),
-        );
         let profile = config::Profile {
-            env: Some(env),
+            env: Some(BTreeMap::from([(
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
+                "16000".to_string(),
+            )])),
             ..Default::default()
         };
-        let items = build_field_items(&profile, 0, &InputState::None, true);
+        let items = rows_for(&profile);
         // the Env section contributes exactly its header plus one entry
         assert_eq!(items.len(), baseline_rows() + 2);
 
@@ -589,10 +608,12 @@ mod tests {
     }
 
     #[test]
-    fn no_env_no_section() {
-        let profile = config::Profile::default();
-        let items = build_field_items(&profile, 0, &InputState::None, true);
-        assert!(render_items(&items).iter().all(|t| !t.contains("Env")));
+    fn empty_env_table_renders_no_section() {
+        let profile = config::Profile {
+            env: Some(BTreeMap::new()),
+            ..Default::default()
+        };
+        assert_eq!(rows_for(&profile).len(), baseline_rows());
     }
 
     /// Render a (block-less) list and return one trimmed string per row.
@@ -603,12 +624,10 @@ mod tests {
         let area = ratatui::layout::Rect::new(0, 0, width, height);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         List::new(items.to_vec()).render(area, &mut buf);
-        (0..height)
+        buf.content()
+            .chunks(width as usize)
             .map(|row| {
-                let start = row as usize * width as usize;
-                let end = start + width as usize;
-                buf.content()[start..end]
-                    .iter()
+                row.iter()
                     .map(|c| c.symbol())
                     .collect::<String>()
                     .trim()
