@@ -9,17 +9,17 @@ Manage grouped profiles for different API proxy services (sub2api) — switch pr
 
 Recommend via mise:
 ```bash
-mise use -g github:lywa1998/ccs@latest
+mise use -g github:ptrdlr14/ccs@latest
 ```
 
 Or via cargo-binstall:
 ```bash
-cargo binstall --git https://github.com/lywa1998/ccs.git ccs
+cargo binstall --git https://github.com/ptrdlr14/ccs.git ccs
 ```
 
 Or via cargo:
 ```bash
-cargo install --git https://github.com/lywa1998/ccs.git
+cargo install --git https://github.com/ptrdlr14/ccs.git
 ```
 
 ## Usage

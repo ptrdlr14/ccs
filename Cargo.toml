@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2021"
 description = "Claude Code Profile Switcher — grouped profile management for API proxy services (sub2api)"
 license = "MIT"
-repository = "https://github.com/lywa1998/ccs"
+repository = "https://github.com/ptrdlr14/ccs"
 readme = "README.md"
 
 [[bin]]
