@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,10 @@ pub struct Profile {
     pub models: Option<Models>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// Arbitrary environment variables injected verbatim.
+    /// Applied last, so they win over `models` / `provider` on key conflicts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -58,6 +62,9 @@ const DEFAULT_CONFIG: &str = r#"# ccs configuration file
 #
 # [profiles.my-provider.models]
 # default = "claude-sonnet-4-6"
+#
+# [profiles.my-provider.env]
+# CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16000"
 
 [profiles]
 "#;
@@ -136,6 +143,10 @@ pub fn build_env(profile: &Profile, reveal: bool) -> HashMap<String, String> {
         }
     }
 
+    if let Some(ref env) = profile.env {
+        env_map.extend(env.clone());
+    }
+
     env_map
 }
 
@@ -160,19 +171,31 @@ pub struct FieldDef {
 }
 
 fn none_if_empty(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 macro_rules! model_field {
     ($get:ident, $set:ident, $field:ident) => {
-        fn $get(p: &Profile) -> Option<String> { p.models.as_ref()?.$field.clone() }
-        fn $set(p: &mut Profile, v: String) { p.models.get_or_insert_default().$field = none_if_empty(v); }
+        fn $get(p: &Profile) -> Option<String> {
+            p.models.as_ref()?.$field.clone()
+        }
+        fn $set(p: &mut Profile, v: String) {
+            p.models.get_or_insert_default().$field = none_if_empty(v);
+        }
     };
 }
 
 // Profile section
-fn get_description(p: &Profile) -> Option<String> { p.description.clone() }
-fn set_description(p: &mut Profile, v: String) { p.description = none_if_empty(v); }
+fn get_description(p: &Profile) -> Option<String> {
+    p.description.clone()
+}
+fn set_description(p: &mut Profile, v: String) {
+    p.description = none_if_empty(v);
+}
 
 // Models section
 model_field!(get_default, set_default, default);
@@ -276,3 +299,82 @@ pub const PROFILE_FIELDS: &[FieldDef] = &[
         set: set_env_key,
     },
 ];
+
+// ── tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_table_is_injected() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
+            "16000".to_string(),
+        );
+        env.insert(
+            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
+            "80".to_string(),
+        );
+        let profile = Profile {
+            env: Some(env),
+            ..Default::default()
+        };
+
+        let e = build_env(&profile, true);
+        assert_eq!(
+            e.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS").map(String::as_str),
+            Some("16000")
+        );
+        assert_eq!(
+            e.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").map(String::as_str),
+            Some("80")
+        );
+    }
+
+    #[test]
+    fn env_table_overrides_models_on_conflict() {
+        let mut env = BTreeMap::new();
+        env.insert("ANTHROPIC_MODEL".to_string(), "override-model".to_string());
+        let profile = Profile {
+            models: Some(Models {
+                default: Some("base-model".to_string()),
+                ..Default::default()
+            }),
+            env: Some(env),
+            ..Default::default()
+        };
+
+        let e = build_env(&profile, true);
+        assert_eq!(
+            e.get("ANTHROPIC_MODEL").map(String::as_str),
+            Some("override-model")
+        );
+    }
+
+    #[test]
+    fn env_table_round_trips() {
+        let toml_src = r#"
+[profiles.demo]
+[profiles.demo.env]
+CLAUDE_CODE_MAX_CONTEXT_TOKENS = "128000"
+"#;
+        let config: Config = toml::from_str(toml_src).unwrap();
+        let profile = config.profiles.get("demo").unwrap();
+        assert_eq!(
+            profile
+                .env
+                .as_ref()
+                .unwrap()
+                .get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+                .map(String::as_str),
+            Some("128000")
+        );
+
+        // re-serialize keeps the env table
+        let out = toml::to_string_pretty(&config).unwrap();
+        let reparsed: Config = toml::from_str(&out).unwrap();
+        assert!(reparsed.profiles.get("demo").unwrap().env.is_some());
+    }
+}

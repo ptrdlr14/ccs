@@ -88,6 +88,33 @@ All model fields are optional. Unset fields are simply not passed to Claude Code
 | `base_url` | `ANTHROPIC_BASE_URL` | API endpoint URL |
 | `env_key` | — | Name of the env var that holds the API key |
 
+### Custom environment variables
+
+The optional `env` table passes any environment variable verbatim to Claude Code —
+useful for behavior flags that have no dedicated profile field:
+
+```toml
+[profiles.self-hosted]
+description = "Self-hosted model"
+
+[profiles.self-hosted.env]
+CLAUDE_CODE_MAX_CONTEXT_TOKENS = "128000"
+CLAUDE_CODE_AUTO_COMPACT_WINDOW = "128000"
+CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "80"
+CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16000"
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Claude Code 假定的上下文窗口，影响 /context、何时 compact |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 自动压缩阈值（可与上面设成同一值） |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | 窗口用到百分之几时 compact，常用 80 |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | 单次生成上限。未知模型默认常按 32K 预留，会挤占有效输入窗口，自部署建议压到 8k–16k |
+
+Entries are injected last: if `env` sets a variable that `models` / `provider` also
+set, the `env` value wins. The TUI shows the table read-only in an **Env** section;
+edit it in `~/.config/ccs/config.toml`.
+
 ## License
 
 MIT

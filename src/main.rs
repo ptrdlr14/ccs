@@ -25,10 +25,7 @@ fn launch(profile: &config::Profile, profile_name: &str) -> ! {
 
     env_map.extend(config::build_env(profile, true));
 
-    let user_args: Vec<String> = env::args()
-        .skip(1)
-        .filter(|a| a != profile_name)
-        .collect();
+    let user_args: Vec<String> = env::args().skip(1).filter(|a| a != profile_name).collect();
 
     let err = Command::new("claude")
         .args(&user_args)

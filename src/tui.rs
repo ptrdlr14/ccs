@@ -159,6 +159,23 @@ fn footer_span(key: &str) -> Span<'static> {
     )
 }
 
+/// Cursor marker for the focused row.
+fn bullet(focused: bool, current: bool) -> &'static str {
+    if focused && current {
+        " ▸"
+    } else {
+        "  "
+    }
+}
+
+/// Section header row for the right-hand field list.
+fn section_header(title: &str) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        format!("  {title} "),
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )))
+}
+
 /// Build the field list items (with section headers) for the right panel.
 /// `focused` indicates whether the right panel has focus.
 fn build_field_items<'a>(
@@ -173,10 +190,7 @@ fn build_field_items<'a>(
     for (i, field) in PROFILE_FIELDS.iter().enumerate() {
         if current_section != Some(field.section) {
             current_section = Some(field.section);
-            items.push(ListItem::new(Line::from(Span::styled(
-                format!("  {} ", field.section),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ))));
+            items.push(section_header(field.section));
         }
 
         let value = (field.get)(profile);
@@ -190,8 +204,8 @@ fn build_field_items<'a>(
                 use std::fmt::Write;
                 write!(display, "{}█{}", &buffer[..byte_pos], &buffer[byte_pos..]).unwrap();
                 Line::from(vec![
-                    Span::raw(if focused { " ▸" } else { "  " }),
-                    Span::styled(field.label.to_string(), Style::default().fg(MUTED)),
+                    Span::raw(bullet(focused, true)),
+                    Span::styled(field.label, Style::default().fg(MUTED)),
                     Span::raw("  "),
                     Span::styled(display, Style::default().fg(Color::Yellow)),
                 ])
@@ -202,20 +216,28 @@ fn build_field_items<'a>(
                 } else {
                     Style::default().fg(MUTED)
                 };
-                let bullet = if focused && i == field_idx {
-                    " ▸"
-                } else {
-                    "  "
-                };
                 Line::from(vec![
-                    Span::raw(bullet),
-                    Span::styled(field.label.to_string(), Style::default().fg(MUTED)),
+                    Span::raw(bullet(focused, i == field_idx)),
+                    Span::styled(field.label, Style::default().fg(MUTED)),
                     Span::raw("  "),
                     Span::styled(value_str, val_style),
                 ])
             }
         };
         items.push(ListItem::new(line));
+    }
+
+    // ── read-only Env section: configured in config.toml, not editable here ──
+    if let Some(env) = profile.env.as_ref().filter(|e| !e.is_empty()) {
+        items.push(section_header("Env — edit in ~/.config/ccs/config.toml"));
+        for (key, value) in env {
+            items.push(ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(key.as_str(), Style::default().fg(MUTED)),
+                Span::raw("  "),
+                Span::styled(value.as_str(), Style::default().fg(Color::Green)),
+            ])));
+        }
     }
 
     items
@@ -271,11 +293,7 @@ pub fn run(mut app: App) -> (App, Option<String>) {
                 .iter()
                 .enumerate()
                 .map(|(i, name)| {
-                    let bullet = if left_focused && i == selected_idx {
-                        " ▸"
-                    } else {
-                        "  "
-                    };
+                    let bullet = bullet(left_focused, i == selected_idx);
                     let desc = app.config.profiles[name]
                         .description
                         .as_deref()
@@ -533,5 +551,69 @@ pub fn run(mut app: App) -> (App, Option<String>) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Rows rendered for a profile without any env entries.
+    fn baseline_rows() -> usize {
+        build_field_items(&config::Profile::default(), 0, &InputState::None, true).len()
+    }
+
+    #[test]
+    fn field_items_include_readonly_env_section() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
+            "16000".to_string(),
+        );
+        let profile = config::Profile {
+            env: Some(env),
+            ..Default::default()
+        };
+        let items = build_field_items(&profile, 0, &InputState::None, true);
+        // the Env section contributes exactly its header plus one entry
+        assert_eq!(items.len(), baseline_rows() + 2);
+
+        // read-only rows render at the end of the list
+        let texts = render_items(&items);
+        let header = &texts[texts.len() - 2];
+        let entry = &texts[texts.len() - 1];
+        assert!(header.contains("Env") && header.contains("config.toml"));
+        assert!(entry.contains("CLAUDE_CODE_MAX_OUTPUT_TOKENS"));
+        assert!(entry.contains("16000"));
+    }
+
+    #[test]
+    fn no_env_no_section() {
+        let profile = config::Profile::default();
+        let items = build_field_items(&profile, 0, &InputState::None, true);
+        assert!(render_items(&items).iter().all(|t| !t.contains("Env")));
+    }
+
+    /// Render a (block-less) list and return one trimmed string per row.
+    fn render_items(items: &[ListItem]) -> Vec<String> {
+        use ratatui::widgets::Widget;
+        let width = 80u16;
+        let height = items.len() as u16;
+        let area = ratatui::layout::Rect::new(0, 0, width, height);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        List::new(items.to_vec()).render(area, &mut buf);
+        (0..height)
+            .map(|row| {
+                let start = row as usize * width as usize;
+                let end = start + width as usize;
+                buf.content()[start..end]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect()
     }
 }
