@@ -1,51 +1,112 @@
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::io::Write;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::fatal;
 
 // ── types ──────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize, Serialize, Clone)]
-pub struct Provider {
-    pub base_url: String,
-    pub env_key: String,
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ArgValue {
+    String(String),
+    Flag(bool),
+    List(Vec<String>),
 }
 
-#[derive(Deserialize, Serialize, Default, Clone)]
-pub struct Models {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_fable: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_opus: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_sonnet: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_haiku: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent: Option<String>,
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvSource {
+    pub from_env: String,
 }
 
-#[derive(Deserialize, Serialize, Clone, Default)]
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EnvValue {
+    Literal(String),
+    FromEnv(EnvSource),
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    #[serde(default)]
+    pub args: BTreeMap<String, ArgValue>,
+    #[serde(default)]
+    pub env: BTreeMap<String, EnvValue>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub models: Option<Models>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<Provider>,
-    /// Arbitrary environment variables injected verbatim.
-    /// Applied last, so they win over `models` / `provider` on key conflicts.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub uses: Vec<String>,
+    #[serde(default)]
+    pub args: BTreeMap<String, ArgValue>,
+    #[serde(default)]
+    pub env: BTreeMap<String, EnvValue>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub shared: HashMap<String, Settings>,
     pub profiles: HashMap<String, Profile>,
+}
+
+impl Config {
+    pub fn resolve(&self, profile: &Profile, profile_name: &str) -> Result<Settings, String> {
+        let mut settings = Settings::default();
+        for name in &profile.uses {
+            let shared = self.shared.get(name).ok_or_else(|| {
+                format!("profile \"{profile_name}\": unknown shared configuration \"{name}\"")
+            })?;
+            settings.args.extend(shared.args.clone());
+            settings.env.extend(shared.env.clone());
+        }
+        settings.args.extend(profile.args.clone());
+        settings.env.extend(profile.env.clone());
+        Ok(settings)
+    }
+}
+
+impl Settings {
+    pub fn build_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for (name, value) in &self.args {
+            match value {
+                ArgValue::String(value) => args.push(format!("--{name}={value}")),
+                ArgValue::Flag(true) => args.push(format!("--{name}")),
+                ArgValue::Flag(false) => {}
+                ArgValue::List(values) => {
+                    args.extend(values.iter().map(|value| format!("--{name}={value}")));
+                }
+            }
+        }
+        args
+    }
+
+    pub fn build_env(&self, profile_name: &str) -> Result<HashMap<String, String>, String> {
+        self.env
+            .iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    EnvValue::Literal(value) => value.clone(),
+                    EnvValue::FromEnv(source) => env::var(&source.from_env).map_err(|e| {
+                        format!(
+                            "profile \"{profile_name}\", env.{key}: cannot read environment variable {}: {e}",
+                            source.from_env
+                        )
+                    })?,
+                };
+                Ok((key.clone(), value))
+            })
+            .collect()
+    }
 }
 
 // ── config loading ─────────────────────────────────────────────────────────
@@ -53,17 +114,23 @@ pub struct Config {
 const DEFAULT_CONFIG: &str = r#"# ccs configuration file
 #
 # Example:
-# [profiles.my-provider]
-# description = "My API provider"
+# [shared.common.args]
+# permission-mode = "plan"
 #
-# [profiles.my-provider.provider]
-# base_url = "https://api.example.com"
-# env_key = "MY_API_KEY"
+# [shared.proxy.env]
+# ANTHROPIC_BASE_URL = "https://api.example.com"
+# ANTHROPIC_AUTH_TOKEN = { from_env = "MY_API_KEY" }
+# ANTHROPIC_API_KEY = ""
 #
-# [profiles.my-provider.models]
-# default = "claude-sonnet-4-6"
+# [profiles.coding]
+# description = "Coding"
+# uses = ["common", "proxy"]
 #
-# [profiles.my-provider.env]
+# [profiles.coding.args]
+# plugin-dir = ["./plugins/coding", "./plugins/tools"]
+#
+# [profiles.coding.env]
+# ANTHROPIC_MODEL = "my-model"
 # CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16000"
 
 [profiles]
@@ -76,11 +143,12 @@ fn config_path() -> String {
     format!("{home}/.config/ccs/config.toml")
 }
 
-fn ensure_config_dir(cpath: &str) {
-    if let Some(parent) = std::path::Path::new(cpath).parent() {
-        std::fs::create_dir_all(parent)
-            .unwrap_or_else(|e| fatal(&format!("cannot create config directory: {e}")));
-    }
+fn create_default_config(cpath: &std::path::Path) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(cpath)?;
+    file.write_all(DEFAULT_CONFIG.as_bytes())
 }
 
 pub fn load_config() -> Config {
@@ -88,219 +156,23 @@ pub fn load_config() -> Config {
     let content = match std::fs::read_to_string(&cpath) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            ensure_config_dir(&cpath);
-            std::fs::write(&cpath, DEFAULT_CONFIG)
-                .unwrap_or_else(|e| fatal(&format!("cannot write default config to {cpath}: {e}")));
-            return Config {
-                profiles: HashMap::new(),
-            };
+            if let Some(parent) = std::path::Path::new(&cpath).parent() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|e| fatal(&format!("cannot create config directory: {e}")));
+            }
+            match create_default_config(std::path::Path::new(&cpath)) {
+                Ok(()) => return Config::default(),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::fs::read_to_string(&cpath)
+                        .unwrap_or_else(|e| fatal(&format!("cannot read {cpath}: {e}")))
+                }
+                Err(e) => fatal(&format!("cannot write default config to {cpath}: {e}")),
+            }
         }
         Err(e) => fatal(&format!("cannot read {cpath}: {e}")),
     };
-    let config: Config = toml::from_str(&content)
-        .unwrap_or_else(|e| fatal(&format!("invalid config in {cpath}: {e}")));
-    config
+    toml::from_str(&content).unwrap_or_else(|e| fatal(&format!("invalid config in {cpath}: {e}")))
 }
-
-// ── environment ────────────────────────────────────────────────────────────
-
-pub fn build_env(profile: &Profile, reveal: bool) -> HashMap<String, String> {
-    let mut env_map = HashMap::new();
-
-    if let Some(ref models) = profile.models {
-        let pairs: [(&str, &Option<String>); 6] = [
-            ("ANTHROPIC_MODEL", &models.default),
-            ("ANTHROPIC_DEFAULT_FABLE_MODEL", &models.default_fable),
-            ("ANTHROPIC_DEFAULT_OPUS_MODEL", &models.default_opus),
-            ("ANTHROPIC_DEFAULT_SONNET_MODEL", &models.default_sonnet),
-            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", &models.default_haiku),
-            ("CLAUDE_CODE_SUBAGENT_MODEL", &models.subagent),
-        ];
-        for (key, val) in pairs {
-            if let Some(ref v) = val {
-                env_map.insert(key.to_string(), v.clone());
-            }
-        }
-    }
-
-    if let Some(ref provider) = profile.provider {
-        env_map.insert("ANTHROPIC_BASE_URL".into(), provider.base_url.clone());
-        if reveal {
-            let token = env::var(&provider.env_key).unwrap_or_else(|_| {
-                fatal(&format!(
-                    "environment variable {} is not set",
-                    provider.env_key
-                ));
-            });
-            env_map.insert("ANTHROPIC_AUTH_TOKEN".into(), token);
-            env_map.insert("ANTHROPIC_API_KEY".into(), String::new());
-        } else {
-            env_map.insert(
-                "ANTHROPIC_AUTH_TOKEN".into(),
-                format!("${}", provider.env_key),
-            );
-            env_map.insert("ANTHROPIC_API_KEY".into(), "(cleared)".into());
-        }
-    }
-
-    // keep last: the env table wins over models/provider (see Profile::env).
-    // Correctness here depends on source order — nothing may be appended below.
-    if let Some(ref env) = profile.env {
-        env_map.extend(env.clone());
-    }
-
-    env_map
-}
-
-// ── save ───────────────────────────────────────────────────────────────────
-
-pub fn save_config(config: &Config) {
-    let cpath = config_path();
-    ensure_config_dir(&cpath);
-    let content = toml::to_string_pretty(config)
-        .unwrap_or_else(|e| fatal(&format!("failed to serialize config: {e}")));
-    std::fs::write(&cpath, content)
-        .unwrap_or_else(|e| fatal(&format!("cannot write {cpath}: {e}")));
-}
-
-// ── field definitions ──────────────────────────────────────────────────────
-
-pub struct FieldDef {
-    pub label: &'static str,
-    pub section: &'static str,
-    pub get: fn(&Profile) -> Option<String>,
-    pub set: fn(&mut Profile, String),
-}
-
-fn none_if_empty(s: String) -> Option<String> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}
-
-macro_rules! model_field {
-    ($get:ident, $set:ident, $field:ident) => {
-        fn $get(p: &Profile) -> Option<String> {
-            p.models.as_ref()?.$field.clone()
-        }
-        fn $set(p: &mut Profile, v: String) {
-            p.models.get_or_insert_default().$field = none_if_empty(v);
-        }
-    };
-}
-
-// Profile section
-fn get_description(p: &Profile) -> Option<String> {
-    p.description.clone()
-}
-fn set_description(p: &mut Profile, v: String) {
-    p.description = none_if_empty(v);
-}
-
-// Models section
-model_field!(get_default, set_default, default);
-model_field!(get_default_fable, set_default_fable, default_fable);
-model_field!(get_default_opus, set_default_opus, default_opus);
-model_field!(get_default_sonnet, set_default_sonnet, default_sonnet);
-model_field!(get_default_haiku, set_default_haiku, default_haiku);
-model_field!(get_subagent, set_subagent, subagent);
-
-// Provider section
-fn get_base_url(p: &Profile) -> Option<String> {
-    Some(p.provider.as_ref()?.base_url.clone())
-}
-fn set_base_url(p: &mut Profile, v: String) {
-    if v.is_empty() {
-        return;
-    }
-    let pr = match p.provider {
-        Some(ref mut pr) => pr,
-        None => {
-            p.provider = Some(Provider {
-                base_url: String::new(),
-                env_key: String::new(),
-            });
-            p.provider.as_mut().unwrap()
-        }
-    };
-    pr.base_url = v;
-}
-
-fn get_env_key(p: &Profile) -> Option<String> {
-    p.provider.as_ref().map(|pr| pr.env_key.clone())
-}
-fn set_env_key(p: &mut Profile, v: String) {
-    let pr = match p.provider {
-        Some(ref mut pr) => pr,
-        None => {
-            p.provider = Some(Provider {
-                base_url: String::new(),
-                env_key: String::new(),
-            });
-            p.provider.as_mut().unwrap()
-        }
-    };
-    pr.env_key = v;
-}
-
-pub const PROFILE_FIELDS: &[FieldDef] = &[
-    FieldDef {
-        label: "description",
-        section: "Profile",
-        get: get_description,
-        set: set_description,
-    },
-    FieldDef {
-        label: "default",
-        section: "Models",
-        get: get_default,
-        set: set_default,
-    },
-    FieldDef {
-        label: "fable",
-        section: "Models",
-        get: get_default_fable,
-        set: set_default_fable,
-    },
-    FieldDef {
-        label: "opus",
-        section: "Models",
-        get: get_default_opus,
-        set: set_default_opus,
-    },
-    FieldDef {
-        label: "sonnet",
-        section: "Models",
-        get: get_default_sonnet,
-        set: set_default_sonnet,
-    },
-    FieldDef {
-        label: "haiku",
-        section: "Models",
-        get: get_default_haiku,
-        set: set_default_haiku,
-    },
-    FieldDef {
-        label: "subagent",
-        section: "Models",
-        get: get_subagent,
-        set: set_subagent,
-    },
-    FieldDef {
-        label: "base_url",
-        section: "Provider",
-        get: get_base_url,
-        set: set_base_url,
-    },
-    FieldDef {
-        label: "env_key",
-        section: "Provider",
-        get: get_env_key,
-        set: set_env_key,
-    },
-];
 
 // ── tests ──────────────────────────────────────────────────────────────────
 
@@ -309,97 +181,167 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_table_is_injected() {
-        let profile = Profile {
-            env: Some(BTreeMap::from([
-                (
-                    "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
-                    "16000".to_string(),
-                ),
-                (
-                    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
-                    "80".to_string(),
-                ),
-            ])),
-            ..Default::default()
-        };
+    fn default_config_creation_never_overwrites_existing_content() {
+        let dir = std::env::temp_dir().join(format!("ccs-create-test-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("config.toml");
+        create_default_config(&path).unwrap();
+        let created = std::fs::read_to_string(&path).unwrap();
 
-        let e = build_env(&profile, true);
+        let existing = "[profiles.personal]\ndescription = 'Keep this configuration'\n";
+        std::fs::write(&path, existing).unwrap();
+        let result = create_default_config(&path);
+        let preserved = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(created, DEFAULT_CONFIG);
         assert_eq!(
-            e.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS").map(String::as_str),
-            Some("16000")
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
         );
-        assert_eq!(
-            e.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").map(String::as_str),
-            Some("80")
-        );
+        assert_eq!(preserved, existing);
     }
 
     #[test]
-    fn env_table_overrides_models_on_conflict() {
-        let profile = Profile {
-            models: Some(Models {
-                default: Some("base-model".to_string()),
-                ..Default::default()
-            }),
-            env: Some(BTreeMap::from([(
-                "ANTHROPIC_MODEL".to_string(),
-                "override-model".to_string(),
-            )])),
-            ..Default::default()
-        };
-
-        let e = build_env(&profile, true);
-        assert_eq!(
-            e.get("ANTHROPIC_MODEL").map(String::as_str),
-            Some("override-model")
-        );
+    fn empty_profile_has_no_args_or_env() {
+        let config: Config = toml::from_str("[profiles.official]\n").unwrap();
+        let settings = config
+            .resolve(&config.profiles["official"], "official")
+            .unwrap();
+        assert!(settings.build_args().is_empty());
+        assert!(settings.build_env("official").unwrap().is_empty());
     }
 
     #[test]
-    fn env_table_overrides_provider_on_conflict() {
-        let profile = Profile {
-            provider: Some(Provider {
-                base_url: "https://api.example.com".to_string(),
-                env_key: "MY_API_KEY".to_string(),
-            }),
-            env: Some(BTreeMap::from([(
-                "ANTHROPIC_BASE_URL".to_string(),
-                "https://override.example.com".to_string(),
-            )])),
-            ..Default::default()
-        };
-
-        // reveal = false so no ambient environment variable is read
-        let e = build_env(&profile, false);
-        assert_eq!(
-            e.get("ANTHROPIC_BASE_URL").map(String::as_str),
-            Some("https://override.example.com")
-        );
-    }
-
-    #[test]
-    fn env_table_round_trips() {
-        let toml_src = r#"
+    fn shared_settings_merge_in_order_then_profile_overrides() {
+        let config: Config = toml::from_str(
+            r#"
+[shared.first.args]
+permission-mode = "plan"
+plugin-dir = ["first", "second"]
+verbose = true
+[shared.first.env]
+TOKEN = { from_env = "UNUSED_MISSING_TOKEN" }
+FIRST = "first"
+ORDER = "first"
+[shared.second.args]
+permission-mode = "auto"
+plugin-dir = ["third"]
+[shared.second.env]
+ORDER = "second"
 [profiles.demo]
+uses = ["first", "second"]
+[profiles.demo.args]
+plugin-dir = ["final", "final"]
 [profiles.demo.env]
-CLAUDE_CODE_MAX_CONTEXT_TOKENS = "128000"
-"#;
-        let config: Config = toml::from_str(toml_src).unwrap();
-        let profile = config.profiles.get("demo").unwrap();
+TOKEN = "overridden"
+"#,
+        )
+        .unwrap();
+        let settings = config.resolve(&config.profiles["demo"], "demo").unwrap();
         assert_eq!(
-            profile
-                .env
-                .as_ref()
-                .unwrap()
-                .get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
-                .map(String::as_str),
-            Some("128000")
+            settings.build_args(),
+            [
+                "--permission-mode=auto",
+                "--plugin-dir=final",
+                "--plugin-dir=final",
+                "--verbose"
+            ]
         );
+        let env = settings.build_env("demo").unwrap();
+        assert_eq!(env["FIRST"], "first");
+        assert_eq!(env["ORDER"], "second");
+        assert_eq!(env["TOKEN"], "overridden");
+    }
 
-        // re-serialize keeps the env table
-        let out = toml::to_string_pretty(&config).unwrap();
-        let reparsed: Config = toml::from_str(&out).unwrap();
-        assert!(reparsed.profiles.get("demo").unwrap().env.is_some());
+    #[test]
+    fn arg_values_preserve_literals_and_allow_clearing_shared_values() {
+        let config: Config = toml::from_str(
+            r#"
+[shared.common.args]
+plugin-dir = ["inherited"]
+verbose = true
+[profiles.demo]
+uses = ["common"]
+[profiles.demo.args]
+plugin-dir = []
+verbose = false
+append-system-prompt = "${HOME} $HOME ~/*.txt"
+model = ""
+[profiles.demo.env]
+EMPTY = ""
+LITERAL = "${HOME} $HOME ~/*.txt"
+"#,
+        )
+        .unwrap();
+        let settings = config.resolve(&config.profiles["demo"], "demo").unwrap();
+        assert_eq!(
+            settings.build_args(),
+            ["--append-system-prompt=${HOME} $HOME ~/*.txt", "--model="]
+        );
+        let env = settings.build_env("demo").unwrap();
+        assert_eq!(env["EMPTY"], "");
+        assert_eq!(env["LITERAL"], "${HOME} $HOME ~/*.txt");
+    }
+
+    #[test]
+    fn missing_shared_configuration_identifies_profile_and_reference() {
+        let config: Config = toml::from_str("[profiles.demo]\nuses = ['missing']\n").unwrap();
+        let error = config
+            .resolve(&config.profiles["demo"], "demo")
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            "profile \"demo\": unknown shared configuration \"missing\""
+        );
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        let config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
+        assert!(config.profiles.is_empty());
+        let example = DEFAULT_CONFIG
+            .lines()
+            .skip(3)
+            .map(|line| line.strip_prefix("# ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let config: Config = toml::from_str(&example).unwrap();
+        let settings = config
+            .resolve(&config.profiles["coding"], "coding")
+            .unwrap();
+        assert_eq!(
+            settings.build_args(),
+            [
+                "--permission-mode=plan",
+                "--plugin-dir=./plugins/coding",
+                "--plugin-dir=./plugins/tools"
+            ]
+        );
+        assert!(matches!(
+            settings.env["ANTHROPIC_AUTH_TOKEN"],
+            EnvValue::FromEnv(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_fields_and_types_are_rejected() {
+        for source in [
+            "unknown = true\n[profiles]\n",
+            "[profiles.demo.models]\ndefault = 'old-model'\n",
+            "[profiles.demo.provider]\nbase_url = 'https://api.example.com'\nenv_key = 'KEY'\n",
+            "[profiles.demo]\narg = ['--help']\n",
+            "[profiles.demo]\nargs = ['--help']\n",
+            "[profiles.demo]\nuses = 'common'\n",
+            "[profiles.demo.args]\nmodel = 42\n",
+            "[profiles.demo.args]\nplugin-dir = ['a', true]\n",
+            "[shared.common]\nuses = ['other']\n[profiles]\n",
+            "[profiles.demo.env]\nKEY = 42\n",
+            "[profiles.demo.env]\nKEY = { from_env = 'KEY', typo = true }\n",
+            "[profiles.demo.env]\nKEY = { from_en = 'KEY' }\n",
+        ] {
+            assert!(toml::from_str::<Config>(source).is_err(), "{source}");
+        }
     }
 }

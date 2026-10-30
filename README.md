@@ -1,9 +1,7 @@
 # ccs
 
 Claude Code Profile Switcher.  
-Manage grouped profiles for different API proxy services (sub2api) — switch providers, models, and credentials via a terminal UI.
-
-![screenshot](assets/screenshot.png)
+Launch Claude Code with named profiles for arguments and environment variables.
 
 ## Install
 
@@ -25,95 +23,143 @@ cargo install --git https://github.com/ptrdlr14/ccs.git
 ## Usage
 
 ```bash
-ccs              # open the TUI profile picker
-ccs <profile>    # launch directly with a profile
+ccs                         # show usage and available profiles
+ccs --help                  # show help (-h)
+ccs --version               # show ccs version (-V)
+ccs <profile>               # launch with a profile
+ccs <profile> -p "hello"     # append arguments for this launch
+ccs <profile> --help         # forward --help to Claude Code
 ```
 
-### Keybindings
-
-| Key | Context | Action |
-|-----|---------|--------|
-| `↑` `↓` / `j` `k` | Left panel | Navigate profiles |
-| `Enter` | Left panel | Select profile & launch Claude |
-| `n` | Left panel | Create new profile |
-| `d` | Left panel | Delete selected profile |
-| `→` / `l` | Left panel | Focus right panel (edit fields) |
-| `←` / `h` | Right panel | Focus left panel |
-| `↑` `↓` / `j` `k` | Right panel | Navigate fields |
-| `Enter` | Right panel | Edit selected field |
-| `Enter` | Editing | Confirm & save |
-| `Esc` | Editing / Creating | Cancel |
-| `q` / `Esc` / `Ctrl-c` | Global | Quit |
+All arguments after the profile name are preserved and appended after the
+profile's generated arguments, including `--help`, `--version`, and `--`.
+Invalid options and unknown profiles print an error with usage and exit with code 2.
 
 ## Configuration
 
-Profiles are defined in `~/.config/ccs/config.toml`:
+Create, edit, and delete profiles in `~/.config/ccs/config.toml`. If the file does
+not exist, ccs creates an empty configuration with a commented example when
+listing or launching profiles.
 
 ```toml
-# Direct Anthropic subscription — no extra config needed.
-# Models and provider are optional; Claude Code built-in defaults apply.
-[profiles.anthropic]
-description = "Anthropic"
+[shared.common.args]
+permission-mode = "plan"
+plugin-dir = ["./plugins/tools"]
 
-# Proxy / third-party API — override models and endpoint.
-[profiles.deepseek]
-description = "DeepSeek"
-
-[profiles.deepseek.models]
-default = "deepseek-v4-pro[1m]"
-default_fable = "deepseek-v4-pro[1m]"
-
-[profiles.deepseek.provider]
-base_url = "https://api.deepseek.com/anthropic"
-env_key = "DEEPSEEK_API_KEY_CLAUDE_CODE"
-```
-
-### Model fields
-
-All model fields are optional. Unset fields are simply not passed to Claude Code, so its built-in defaults apply.
-
-| Field | Environment variable | Purpose |
-|-------|---------------------|---------|
-| `default` | `ANTHROPIC_MODEL` | 主模型 |
-| `default_fable` | `ANTHROPIC_DEFAULT_FABLE_MODEL` | Fable 5，用于自动模型回退 |
-| `default_opus` | `ANTHROPIC_DEFAULT_OPUS_MODEL` | 用于 opus，或 Plan Mode 活跃时的 opusplan |
-| `default_sonnet` | `ANTHROPIC_DEFAULT_SONNET_MODEL` | 用于 sonnet，或 Plan Mode 不活跃时的 opusplan |
-| `default_haiku` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | 用于 haiku 及后台功能 |
-| `subagent` | `CLAUDE_CODE_SUBAGENT_MODEL` | 用于所有 subagents 和 agent teams，设为 `inherit` 使用常规模型解析 |
-
-### Provider fields
-
-| Field | Environment variable | Purpose |
-|-------|---------------------|---------|
-| `base_url` | `ANTHROPIC_BASE_URL` | API endpoint URL |
-| `env_key` | — | Name of the env var that holds the API key |
-
-### Custom environment variables
-
-The optional `env` table passes any environment variable verbatim to Claude Code —
-useful for behavior flags that have no dedicated profile field:
-
-```toml
-[profiles.self-hosted]
-description = "Self-hosted model"
-
-[profiles.self-hosted.env]
-CLAUDE_CODE_MAX_CONTEXT_TOKENS = "128000"
-CLAUDE_CODE_AUTO_COMPACT_WINDOW = "128000"
-CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "80"
+[shared.common.env]
 CLAUDE_CODE_MAX_OUTPUT_TOKENS = "16000"
+
+[shared.proxy.env]
+ANTHROPIC_BASE_URL = "https://api.example.com"
+ANTHROPIC_AUTH_TOKEN = { from_env = "MY_API_KEY" }
+ANTHROPIC_API_KEY = ""
+
+[profiles.official]
+description = "Official account"
+
+[profiles.coding]
+description = "Coding"
+uses = ["common", "proxy"]
+
+[profiles.coding.args]
+permission-mode = "auto"
+
+[profiles.coding.env]
+ANTHROPIC_MODEL = "coding-model"
 ```
 
-| Variable | Purpose |
-|----------|---------|
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Claude Code 假定的上下文窗口，影响 /context、何时 compact |
-| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 自动压缩阈值（可与上面设成同一值） |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | 窗口用到百分之几时 compact，常用 80 |
-| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | 单次生成上限。未知模型默认常按 32K 预留，会挤占有效输入窗口，自部署建议压到 8k–16k |
+Each profile accepts four optional fields:
 
-Entries are injected last: if `env` sets a variable that `models` / `provider` also
-set — or that you have exported in your shell — the `env` value wins. The TUI shows
-the table read-only in an **Env** section; edit it in `~/.config/ccs/config.toml`.
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `description` | String | Omitted | Description displayed in the profile list |
+| `uses` | Array of strings | `[]` | Shared configurations applied in order |
+| `args` | Table | Empty | Named command-line options |
+| `env` | Table | Empty | Environment variables applied to the child process |
+
+Shared configurations contain `args` and `env`. They are referenced by `uses`,
+do not appear in the profile list, and cannot be launched directly. Shared
+configurations do not reference other shared configurations or profiles.
+
+Unknown configuration fields and invalid value types are rejected.
+Configuration errors exit with code 1. Help and version commands do not read
+the configuration.
+
+### Shared configuration
+
+ccs applies each name in `uses` from left to right, then the profile's own
+`args` and `env`. Both tables merge by key: later values replace earlier values.
+Arrays are replaced as a whole, preserving their element order and duplicates.
+Entries that are not overridden remain in the result.
+
+For `coding` above, `common` supplies the plugin directory and output limit,
+`proxy` supplies the endpoint and credentials, and `coding` replaces
+`permission-mode` and adds its model. Missing shared configurations are reported
+when launching the profile that references them.
+
+### Arguments
+
+Use long option names without the `--` prefix:
+
+| Value | Example | Generated arguments |
+|-------|---------|---------------------|
+| String | `permission-mode = "plan"` | `--permission-mode=plan` |
+| Boolean | `verbose = true` | `--verbose` |
+| Array of strings | `plugin-dir = ["./a", "./b"]` | `--plugin-dir=./a --plugin-dir=./b` |
+
+`false` and empty arrays generate no arguments and can replace inherited values.
+An empty string generates `--option=`. Arguments are generated in option-name
+order; array elements retain their configured order. Positional arguments such
+as prompts can be passed on the command line.
+
+Running `ccs coding -p "Review this project"` with the example above launches
+the equivalent of:
+
+```bash
+claude --permission-mode=auto --plugin-dir=./plugins/tools -p "Review this project"
+```
+
+ccs passes values directly without invoking a shell. Spaces are preserved;
+variables, `~`, and wildcards are not expanded. It does not maintain a list of
+Claude Code options or supply their defaults. Claude Code interprets the options
+and their precedence relative to environment variables. Command-line arguments
+are appended unchanged; duplicate options between the configuration and command
+line are handled by Claude Code.
+
+### Environment variables
+
+Each entry is either a literal string or a reference to a variable in the
+environment that launched ccs:
+
+```toml
+[profiles.example.env]
+LITERAL = "${HOME}"                       # passed literally
+EMPTY = ""                               # set to an empty string
+TOKEN = { from_env = "MY_API_KEY" }       # read MY_API_KEY at launch
+```
+
+References are resolved after all shared and profile entries are merged.
+Overridden references are not read. References always read the original parent
+environment, including variables that ccs removes or overrides for the child;
+they do not reference other entries in `env`. A missing source variable stops
+the launch with an error identifying the profile, destination variable, and
+source variable. An empty source value is valid. Listing profiles does not
+resolve references.
+
+Before applying the merged environment, ccs removes inherited `ANTHROPIC_*`
+variables. All other shell variables, including `CLAUDE_CODE_*`, are inherited
+unless overridden by `env`. An empty profile clears inherited `ANTHROPIC_*`
+variables and adds no arguments or environment variables of its own.
+
+`KEY = ""` sets an empty string; it does not remove the variable. Authentication
+variables are configured explicitly, including `ANTHROPIC_API_KEY = ""` in the
+proxy example.
+
+## Reference
+
+See [the Claude Code configuration reference](docs/claude-code.md) for the
+checked Claude Code version, model and authentication environment variables,
+startup arguments, and a versioned CLI help snapshot.
 
 ## License
 
